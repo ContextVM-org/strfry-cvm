@@ -2,33 +2,33 @@
 
 ## Service-only strfry deployment helper.
 ##
-## Deploys strfry on a remote Ubuntu VPS, installs a Perl write-policy plugin,
+## Deploys strfry on the local Ubuntu VPS, installs a Perl write-policy plugin,
 ## and sets up a systemd service. Reverse proxy and TLS are intentionally left
 ## out so they can be managed separately (for example by Caddy).
 
 set -euo pipefail
 
-if [ "$#" -lt 1 ] || [ "$#" -gt 4 ]; then
-    echo "Deploys strfry service to a fresh Ubuntu VPS without configuring a reverse proxy."
+if [ "$#" -gt 4 ]; then
+    echo "Deploys strfry service on the current Ubuntu VPS without configuring a reverse proxy."
     echo
-    echo "Usage: $0 HOST [ADMIN_EMAIL] [ADMIN_PUBKEY] [REPO_REF]"
+    echo "Usage: $0 [HOST] [ADMIN_EMAIL] [ADMIN_PUBKEY] [REPO_REF]"
     echo "Example: $0 relay.example.com admin@example.com <32-byte-hex-pubkey> master"
+    echo "Example: $0"
     exit 1
 fi
 
-HOST="$1"
-ADMIN_EMAIL="${2:-admin@$HOST}"
+HOST="${1:-$(hostname -f 2>/dev/null || hostname)}"
+ADMIN_EMAIL="${2:-}"
 ADMIN_PUBKEY="${3:-}"
 REPO_REF="${4:-master}"
 
-ssh "root@$HOST" bash -s -- "$HOST" "$ADMIN_EMAIL" "$ADMIN_PUBKEY" "$REPO_REF" << 'EOF'
 set -euo pipefail
 set -x
 
-HOST="$1"
-ADMIN_EMAIL="$2"
-ADMIN_PUBKEY="$3"
-REPO_REF="$4"
+if [ "$(id -u)" -ne 0 ]; then
+    echo "This script must be run as root on the target VPS." >&2
+    exit 1
+fi
 
 STRFRY_USER="strfry"
 STRFRY_GROUP="strfry"
@@ -222,4 +222,3 @@ echo "DB:      ${STRFRY_DB_DIR}"
 echo "Plugin:  ${STRFRY_PLUGIN_PATH}"
 echo "Logs:    journalctl -u strfry -f"
 echo "Status:  systemctl status strfry"
-EOF
