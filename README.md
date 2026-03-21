@@ -1,4 +1,6 @@
 # strfry - a nostr relay
+## ContextVM fork
+This is a fork of strfry focused on simplifying ContextVM relay deployments. Relative to upstream, it adds a service-oriented Ubuntu VPS deployment script and a Perl write-policy plugin that restricts accepted event kinds to the subset used by our relay, while leaving reverse proxy and TLS configuration to external tools such as Caddy.
 
 ![strfry logo](docs/strfry.svg)
 
@@ -24,9 +26,10 @@ If you are using strfry, please [join our telegram chat](https://t.me/strfry_use
 
 * [Setup](#setup)
     * [Compile](#compile)
-* [Operating](#operating)
-    * [Running a relay](#running-a-relay)
-    * [Configuration](#configuration)
+ * [Operating](#operating)
+     * [Running a relay](#running-a-relay)
+        * [Ubuntu VPS service-only deployment](#ubuntu-vps-service-only-deployment)
+     * [Configuration](#configuration)
     * [Selecting and Deleting Events](#selecting-and-deleting-events)
     * [Importing data](#importing-data)
     * [Exporting data](#exporting-data)
@@ -89,6 +92,49 @@ Here is how to run the relay:
 For dev/testing, the config file `./strfry.conf` is used by default. It stores data in the `./strfry-db/` directory.
 
 By default, it listens on port 7777 and only accepts connections from localhost. In production, you'll probably want a systemd unit file and a reverse proxy such as nginx to support SSL and other features.
+
+#### Ubuntu VPS service-only deployment
+
+This repository also includes a helper script at [`scripts/idempotent-vps-deploy-service-only.sh`](scripts/idempotent-vps-deploy-service-only.sh) for deploying [`strfry`](README.md:87) directly on an Ubuntu VPS.
+
+The script is intended to be executed locally on the target VPS as root. It:
+
+* installs the required build and runtime packages
+* builds [`strfry`](README.md:87) from source
+* installs the binary to [`/usr/local/bin/strfry`](README.md)
+* writes a systemd unit at [`/etc/systemd/system/strfry.service`](README.md)
+* writes [`/etc/strfry.conf`](README.md:95)
+* installs a Perl write-policy plugin that only accepts kinds `1059`, `21059`, `25910`, and the range `10000-19999`
+
+Basic usage:
+
+    sudo bash ./scripts/idempotent-vps-deploy-service-only.sh
+
+Optional arguments:
+
+    sudo bash ./scripts/idempotent-vps-deploy-service-only.sh [HOST] [ADMIN_EMAIL] [ADMIN_PUBKEY] [REPO_REF]
+
+Examples:
+
+    sudo bash ./scripts/idempotent-vps-deploy-service-only.sh relay.example.com
+    sudo bash ./scripts/idempotent-vps-deploy-service-only.sh relay.example.com admin@example.com
+    sudo bash ./scripts/idempotent-vps-deploy-service-only.sh relay.example.com admin@example.com <32-byte-hex-pubkey> master
+
+Defaults:
+
+* `HOST`: system hostname from `hostname -f` or `hostname`
+* `ADMIN_EMAIL`: empty
+* `ADMIN_PUBKEY`: empty
+* `REPO_REF`: `master`
+
+The script binds the relay to `127.0.0.1:7777`, so it is intended to sit behind a reverse proxy such as Caddy or nginx. Reverse proxy, TLS, and firewall configuration are intentionally managed separately from this script.
+
+Useful follow-up commands:
+
+    systemctl status strfry
+    journalctl -u strfry -f
+
+Re-running [`scripts/idempotent-vps-deploy-service-only.sh`](scripts/idempotent-vps-deploy-service-only.sh) is safe: it rebuilds [`strfry`](README.md:87), refreshes the config and plugin, and restarts the service if it already exists.
 
 ### Configuration
 

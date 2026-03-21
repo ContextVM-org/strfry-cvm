@@ -22,7 +22,6 @@ ADMIN_EMAIL="${2:-}"
 ADMIN_PUBKEY="${3:-}"
 REPO_REF="${4:-master}"
 
-set -euo pipefail
 set -x
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -89,7 +88,10 @@ fi
 
 make -j"$(nproc)"
 
-systemctl stop strfry || true
+if systemctl list-unit-files strfry.service --no-legend 2>/dev/null | grep -q '^strfry\.service'; then
+    systemctl stop strfry || true
+fi
+
 cp "$STRFRY_BUILD_DIR/strfry" "$STRFRY_BINARY_PATH"
 chmod 0755 "$STRFRY_BINARY_PATH"
 
