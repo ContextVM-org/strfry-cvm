@@ -261,6 +261,8 @@ dependencies = [
 [[package]]
 name = "contextvm-sdk"
 version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9a76c567cec4cf071a086f356e9ec8bf0cf9256343601c1650f1f43a5cccef4"
 dependencies = [
  "async-trait",
  "lru 0.12.5",
