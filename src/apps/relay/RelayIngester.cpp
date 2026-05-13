@@ -43,7 +43,8 @@ void RelayServer::runIngester(ThreadPool<MsgIngester>::Thread &thr) {
                             try {
                                 ingesterProcessAuth(rsctx, msg->connId, arr[1]);
                             } catch (std::exception &e) {
-                                sendNoticeError(msg->connId, std::string("auth failed: ") + e.what());
+                                sendOKResponse(msg->connId, arr[1].is_object() && arr[1].at("id").is_string() ? arr[1].at("id").get_string() : "?",
+                                               false, std::string("error: ") + e.what());
                             }
                         } else if (cmd == "REQ" || cmd == "COUNT") {
                             PROM_INC_CLIENT_MSG(cmd);
@@ -66,7 +67,7 @@ void RelayServer::runIngester(ThreadPool<MsgIngester>::Thread &thr) {
                             } catch (std::exception &e) {
                                 sendNoticeError(msg->connId, std::string("bad close: ") + e.what());
                             }
-                        } else if (cmd.starts_with("NEG-")) {
+                        } else if (cmd == "NEG-OPEN" || cmd == "NEG-MSG" || cmd == "NEG-CLOSE") {
                             PROM_INC_CLIENT_MSG(cmd);
                             if (!cfg().relay__negentropy__enabled) throw herr("negentropy disabled");
 
@@ -111,9 +112,6 @@ void RelayServer::ingesterProcessEvent(lmdb::txn &txn, RelayServerCtx &rsctx, ui
 
     PackedEventView packed(packedStr);
     Bytes32 authedPubkey;
-    
-    // Track event kind metrics
-    PROM_INC_EVENT_KIND(std::to_string(packed.kind()));
 
     {
         // discard reposts that embed protected events
@@ -213,7 +211,7 @@ void RelayServer::ingesterProcessReq(lmdb::txn &txn, RelayServerCtx &rsctx, uint
         maxFilterLimit = cfg().relay__maxFilterLimit;
     }
 
-    NostrFilterGroup filterGroup(arr, maxFilterLimit);
+    NostrFilterGroup filterGroup = NostrFilterGroup::fromReq(arr, maxFilterLimit);
 
     try {
         rsctx.filterValidator.validate(filterGroup);
@@ -232,10 +230,22 @@ void RelayServer::ingesterProcessClose(lmdb::txn &txn, uint64_t connId, const ta
     tpReqWorker.dispatch(connId, MsgReqWorker{MsgReqWorker::RemoveSub{connId, SubId(jsonGetString(arr[1], "CLOSE subscription id was not a string"))}});
 }
 
+static std::string normalizeRelayUrl(std::string_view url) {
+    auto pos = url.find("://");
+    if (pos != std::string_view::npos) url.remove_prefix(pos + 3);
+    pos = url.find_first_of("/?#");
+    if (pos != std::string_view::npos) url = url.substr(0, pos);
+    std::string result(url);
+    std::transform(result.begin(), result.end(), result.begin(), [](unsigned char c){ return std::tolower(c); });
+    return result;
+}
+
 void RelayServer::ingesterProcessAuth(RelayServerCtx &rsctx, uint64_t connId, const tao::json::value &eventJson) {
     if (cfg().relay__auth__serviceUrl.empty()) throw herr("relay needs serviceUrl to be configured before AUTH can work");
 
     std::string packedStr, jsonStr;
+    // Note: kind 22242 is ephemeral, so parseAndVerifyEvent() also applies
+    // the stricter ephemeral recency check here.
     parseAndVerifyEvent(eventJson, rsctx.secpCtx, true, true, packedStr, jsonStr);
 
     PackedEventView packed(packedStr);
@@ -252,12 +262,14 @@ void RelayServer::ingesterProcessAuth(RelayServerCtx &rsctx, uint64_t connId, co
     bool foundChallenge = false;
     bool foundCorrectRelayUrl = false;
 
+    std::string normalizedServiceUrl = normalizeRelayUrl(cfg().relay__auth__serviceUrl);
+
     for (const auto &tagj : eventJson.at("tags").get_array()) {
         const auto &tag = tagj.get_array();
         if (tag.size() < 2) continue;
         const auto name = tag[0].as<std::string_view>();
         const auto value = tag[1].as<std::string_view>();
-        if (name == "relay" && value == cfg().relay__auth__serviceUrl) {
+        if (name == "relay" && normalizeRelayUrl(value) == normalizedServiceUrl) {
             foundCorrectRelayUrl = true;
         } else if (name == "challenge" && value == as.challengeSv()) {
             foundChallenge = true;
@@ -275,30 +287,37 @@ void RelayServer::ingesterProcessAuth(RelayServerCtx &rsctx, uint64_t connId, co
 }
 
 void RelayServer::ingesterProcessNegentropy(lmdb::txn &txn, uint64_t connId, const tao::json::value &arr) {
-    const auto &subscriptionStr = jsonGetString(arr[1], "NEG-OPEN subscription id was not a string");
+    const auto &vals = arr.get_array();
 
-    if (arr.at(0) == "NEG-OPEN") {
-        if (arr.get_array().size() < 4) throw herr("negentropy query missing elements");
+    if (vals.size() < 2) throw herr("negentropy query missing elements");
+
+    const auto &cmd = jsonGetString(vals[0], "negentropy command was not a string");
+    const auto &subscriptionStr = jsonGetString(vals[1], "NEG subscription id was not a string");
+
+    if (cmd == "NEG-OPEN") {
+        if (vals.size() < 4) throw herr("negentropy query missing elements");
 
         auto maxFilterLimit = cfg().relay__negentropy__maxSyncEvents + 1;
 
-        auto filterJson = arr.at(2);
+        auto filterJson = vals[2];
         if (!filterJson.is_object()) throw herr("negentropy filter must be an object");
 
-        NostrFilterGroup filter = NostrFilterGroup::unwrapped(filterJson, maxFilterLimit);
+        NostrFilterGroup filter(filterJson, maxFilterLimit);
         Subscription sub(connId, subscriptionStr, std::move(filter));
 
         filterJson.get_object().erase("since");
         filterJson.get_object().erase("until");
         std::string filterStr = tao::json::to_string(filterJson);
 
-        std::string negPayload = from_hex(jsonGetString(arr.at(3), "negentropy payload not a string"));
+        std::string negPayload = from_hex(jsonGetString(vals[3], "negentropy payload not a string"));
 
         tpNegentropy.dispatch(connId, MsgNegentropy{MsgNegentropy::NegOpen{std::move(sub), std::move(filterStr), std::move(negPayload)}});
-    } else if (arr.at(0) == "NEG-MSG") {
-        std::string negPayload = from_hex(jsonGetString(arr.at(2), "negentropy payload not a string"));
+    } else if (cmd == "NEG-MSG") {
+        if (vals.size() < 3) throw herr("negentropy message missing elements");
+
+        std::string negPayload = from_hex(jsonGetString(vals[2], "negentropy payload not a string"));
         tpNegentropy.dispatch(connId, MsgNegentropy{MsgNegentropy::NegMsg{connId, SubId(subscriptionStr), std::move(negPayload)}});
-    } else if (arr.at(0) == "NEG-CLOSE") {
+    } else if (cmd == "NEG-CLOSE") {
         tpNegentropy.dispatch(connId, MsgNegentropy{MsgNegentropy::NegClose{connId, SubId(subscriptionStr)}});
     } else {
         throw herr("unknown command");
