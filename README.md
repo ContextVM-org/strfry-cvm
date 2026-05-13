@@ -102,9 +102,13 @@ The script is intended to be executed locally on the target VPS as root. It:
 * installs the required build and runtime packages
 * builds [`strfry`](README.md:87) from source
 * installs the binary to [`/usr/local/bin/strfry`](README.md)
+* builds and installs [`cvm-announcement-cleaner`](tools/cvm-announcement-cleaner/src/main.rs:63) to [`/usr/local/bin/cvm-announcement-cleaner`](scripts/idempotent-vps-deploy-service-only.sh)
 * writes a systemd unit at [`/etc/systemd/system/strfry.service`](README.md)
+* writes a oneshot systemd service at [`/etc/systemd/system/cvm-announcement-cleaner.service`](scripts/idempotent-vps-deploy-service-only.sh)
+* writes an hourly systemd timer at [`/etc/systemd/system/cvm-announcement-cleaner.timer`](scripts/idempotent-vps-deploy-service-only.sh)
 * writes [`/etc/strfry.conf`](README.md:95)
 * installs a Perl write-policy plugin that only accepts kinds `1059`, `21059`, `25910`, and the range `10000-19999`
+* enables an hourly cleanup timer that removes all locally stored events for dead ContextVM server pubkeys when they fail the scheduled probe run
 
 Basic usage:
 
@@ -133,8 +137,16 @@ Useful follow-up commands:
 
     systemctl status strfry
     journalctl -u strfry -f
+    systemctl status cvm-announcement-cleaner
+    systemctl status cvm-announcement-cleaner.timer
+    journalctl -u cvm-announcement-cleaner -f
+    systemctl list-timers cvm-announcement-cleaner.timer
 
-Re-running [`scripts/idempotent-vps-deploy-service-only.sh`](scripts/idempotent-vps-deploy-service-only.sh) is safe: it rebuilds [`strfry`](README.md:87), refreshes the config and plugin, and restarts the service if it already exists.
+Re-running [`scripts/idempotent-vps-deploy-service-only.sh`](scripts/idempotent-vps-deploy-service-only.sh) is safe: it rebuilds [`strfry`](README.md:87) and [`cvm-announcement-cleaner`](tools/cvm-announcement-cleaner/src/main.rs:63), refreshes the config and plugin, and restarts the services if they already exist.
+
+The cleaner uses the fallback relay list documented in [`tools/cvm-announcement-cleaner/README.md`](tools/cvm-announcement-cleaner/README.md), including `wss://relay.damus.io`, `wss://relay.primal.net`, `wss://relay.nostr.net`, and `wss://nos.lol`, plus the local relay.
+
+The deployed timer runs the cleaner once per hour as a oneshot job with a single pass and immediate deletion threshold, equivalent to `--rounds 1 --failure-threshold 1`.
 
 ### Configuration
 

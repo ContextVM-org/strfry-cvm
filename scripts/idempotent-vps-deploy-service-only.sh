@@ -38,6 +38,7 @@ STRFRY_PLUGIN_PATH="${STRFRY_PLUGIN_DIR}/write-policy-allowed-kinds.pl"
 STRFRY_CONFIG="/etc/strfry.conf"
 STRFRY_BUILD_DIR="/tmp/strfry-build"
 STRFRY_BINARY_PATH="/usr/local/bin/strfry"
+ANNOUNCEMENT_CLEANER_BINARY_PATH="/usr/local/bin/cvm-announcement-cleaner"
 STRFRY_REPO_URL="https://github.com/hoytech/strfry.git"
 
 echo "--- Starting service-only strfry deployment on ${HOST} ---"
@@ -94,6 +95,10 @@ fi
 
 cp "$STRFRY_BUILD_DIR/strfry" "$STRFRY_BINARY_PATH"
 chmod 0755 "$STRFRY_BINARY_PATH"
+
+cargo build --manifest-path "$STRFRY_BUILD_DIR/tools/cvm-announcement-cleaner/Cargo.toml" --release
+cp "$STRFRY_BUILD_DIR/tools/cvm-announcement-cleaner/target/release/cvm-announcement-cleaner" "$ANNOUNCEMENT_CLEANER_BINARY_PATH"
+chmod 0755 "$ANNOUNCEMENT_CLEANER_BINARY_PATH"
 
 cat > "$STRFRY_PLUGIN_PATH" << 'PLUGIN_EOF'
 #!/usr/bin/env perl
@@ -213,14 +218,51 @@ ReadWritePaths=/var/lib/strfry
 WantedBy=multi-user.target
 SERVICE_EOF
 
+cat > /etc/systemd/system/cvm-announcement-cleaner.service << 'CLEANER_SERVICE_EOF'
+[Unit]
+Description=ContextVM announcement cleaner
+After=network-online.target strfry.service
+Wants=network-online.target
+
+[Service]
+User=strfry
+Group=strfry
+Type=oneshot
+ExecStart=/usr/local/bin/cvm-announcement-cleaner --strfry-bin /usr/local/bin/strfry --local-relay ws://127.0.0.1:7777 --failure-threshold 1 --rounds 1
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=full
+ReadWritePaths=/var/lib/strfry
+CLEANER_SERVICE_EOF
+
+cat > /etc/systemd/system/cvm-announcement-cleaner.timer << 'CLEANER_TIMER_EOF'
+[Unit]
+Description=Run ContextVM announcement cleaner hourly
+
+[Timer]
+OnBootSec=10m
+OnUnitActiveSec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+CLEANER_TIMER_EOF
+
 systemctl daemon-reload
 systemctl enable strfry
+systemctl enable cvm-announcement-cleaner.timer
 systemctl restart strfry
+systemctl restart cvm-announcement-cleaner.timer
 
 echo "--- strfry service deployment complete ---"
 echo "Binary:  ${STRFRY_BINARY_PATH}"
+echo "Cleaner: ${ANNOUNCEMENT_CLEANER_BINARY_PATH}"
 echo "Config:  ${STRFRY_CONFIG}"
 echo "DB:      ${STRFRY_DB_DIR}"
 echo "Plugin:  ${STRFRY_PLUGIN_PATH}"
 echo "Logs:    journalctl -u strfry -f"
+echo "Cleaner Logs: journalctl -u cvm-announcement-cleaner -f"
 echo "Status:  systemctl status strfry"
+echo "Cleaner Service Status: systemctl status cvm-announcement-cleaner"
+echo "Cleaner Timer Status: systemctl status cvm-announcement-cleaner.timer"
+echo "Cleaner Schedule: systemctl list-timers cvm-announcement-cleaner.timer"
