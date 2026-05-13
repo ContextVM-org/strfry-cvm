@@ -54,7 +54,7 @@ fetch_release_asset() {
     local asset_name="$1"
     local output_path="$2"
     local ref_name="$3"
-    local api_url release_json asset_url tmp_file
+    local api_url release_json asset_url tmp_dir tmp_file
 
     api_url="https://api.github.com/repos/${STRFRY_REPO_OWNER}/${STRFRY_REPO_NAME}/releases/tags/${ref_name}"
     release_json="$(curl -fsSL -H 'Accept: application/vnd.github+json' "$api_url" 2>/dev/null)" || return 1
@@ -68,11 +68,15 @@ for asset in data.get("assets", []):
 ' "$asset_name" 2>/dev/null)"
 
     if [ -z "$asset_url" ]; then
+        echo "No release asset named ${asset_name} found for ${ref_name}" >&2
         return 1
     fi
 
-    tmp_file="$(mktemp)"
+    tmp_dir="$(dirname "$output_path")"
+    mkdir -p "$tmp_dir"
+    tmp_file="$(mktemp "${tmp_dir}/.${asset_name}.XXXXXX")"
     if ! curl -fsSL "$asset_url" -o "$tmp_file"; then
+        echo "Failed to download release asset ${asset_name} from ${asset_url}" >&2
         rm -f "$tmp_file"
         return 1
     fi
@@ -108,7 +112,7 @@ install_cleaner_binary() {
         return 0
     fi
 
-    echo "No matching prebuilt cleaner binary found for release ${REPO_REF}; falling back to local cargo build"
+    echo "Prebuilt cleaner binary could not be installed for release ${REPO_REF}; falling back to local cargo build"
     cargo build --manifest-path "$STRFRY_BUILD_DIR/tools/cvm-announcement-cleaner/Cargo.toml" --release
     cp "$STRFRY_BUILD_DIR/tools/cvm-announcement-cleaner/target/release/cvm-announcement-cleaner" "$ANNOUNCEMENT_CLEANER_BINARY_PATH"
     chmod 0755 "$ANNOUNCEMENT_CLEANER_BINARY_PATH"
@@ -124,7 +128,7 @@ install_strfry_binary() {
         return 0
     fi
 
-    echo "No matching prebuilt strfry binary found for release ${REPO_REF}; falling back to local make build"
+    echo "Prebuilt strfry binary could not be installed for release ${REPO_REF}; falling back to local make build"
     make -j"$(nproc)"
     cp "$STRFRY_BUILD_DIR/strfry" "$STRFRY_BINARY_PATH"
     chmod 0755 "$STRFRY_BINARY_PATH"
