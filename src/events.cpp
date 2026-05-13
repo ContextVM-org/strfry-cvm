@@ -61,6 +61,10 @@ std::string nostrJsonToPackedEvent(const tao::json::value &v) {
         tagBuilder.add('d', "");
     }
 
+    if (kind == 1059 && expiration == 0) {
+        expiration = created_at + 24 * 60 * 60;
+    }
+
     if (isEphemeralKind(kind)) {
         expiration = 1;
     }

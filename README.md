@@ -110,7 +110,7 @@ The script is intended to be executed locally on the target VPS as root. It:
 * writes [`/etc/strfry.conf`](README.md:95)
 * installs a Perl write-policy plugin that only accepts kinds `1059`, `21059`, `25910`, and the range `10000-19999`
 * enables an hourly cleanup timer that removes all locally stored events for dead ContextVM server pubkeys when they fail the scheduled probe run
-* installs a Perl retention cleanup tool for old `1059` events and enables a daily timer for it
+* assigns a built-in one-day retention period to kind `1059` events so they are deleted automatically by strfry's native expiration cleanup path
 
 Basic usage:
 
@@ -143,9 +143,6 @@ Useful follow-up commands:
     systemctl status cvm-announcement-cleaner.timer
     journalctl -u cvm-announcement-cleaner -f
     systemctl list-timers cvm-announcement-cleaner.timer
-    systemctl status strfry-1059-retention.timer
-    journalctl -u strfry-1059-retention -f
-    systemctl list-timers strfry-1059-retention.timer
 
 Re-running [`scripts/idempotent-vps-deploy-service-only.sh`](scripts/idempotent-vps-deploy-service-only.sh) is safe: it refreshes the config and plugin, tries to fetch prebuilt [`strfry`](README.md:87) and [`cvm-announcement-cleaner`](tools/cvm-announcement-cleaner/src/main.rs:63) binaries from the [`strfry-cvm`](README.md:98) GitHub release matching `REPO_REF`, falls back to a local source build when needed, and restarts the services if they already exist.
 
@@ -153,7 +150,7 @@ The cleaner uses the fallback relay list documented in [`tools/cvm-announcement-
 
 The deployed timer runs the cleaner once per hour as a oneshot job with a single pass and immediate deletion threshold, equivalent to `--rounds 1 --failure-threshold 1`.
 
-The deployed retention timer runs daily and deletes local `1059` events older than one day using [`scripts/cleanup-old-kind-1059.pl`](scripts/cleanup-old-kind-1059.pl).
+Kind `1059` events now receive a default one-day expiration when ingested, so they are removed by strfry's built-in expiration cleanup without a separate retention script or timer.
 
 ### Configuration
 

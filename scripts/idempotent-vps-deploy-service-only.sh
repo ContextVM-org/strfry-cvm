@@ -35,7 +35,6 @@ STRFRY_HOME="/var/lib/strfry"
 STRFRY_DB_DIR="${STRFRY_HOME}/db"
 STRFRY_PLUGIN_DIR="/opt/strfry/plugins"
 STRFRY_PLUGIN_PATH="${STRFRY_PLUGIN_DIR}/write-policy-allowed-kinds.pl"
-STRFRY_RETENTION_PATH="${STRFRY_PLUGIN_DIR}/cleanup-old-kind-1059.pl"
 STRFRY_CONFIG="/etc/strfry.conf"
 STRFRY_BUILD_DIR="/tmp/strfry-build"
 STRFRY_REPO_DIR_NAME="strfry-cvm"
@@ -243,9 +242,6 @@ PLUGIN_EOF
 chown root:"$STRFRY_GROUP" "$STRFRY_PLUGIN_PATH"
 chmod 0750 "$STRFRY_PLUGIN_PATH"
 
-install -m 0750 ./scripts/cleanup-old-kind-1059.pl "$STRFRY_RETENTION_PATH"
-chown root:"$STRFRY_GROUP" "$STRFRY_RETENTION_PATH"
-
 cat > "$STRFRY_CONFIG" << CONFIG_EOF
 db = "${STRFRY_DB_DIR}/"
 
@@ -338,43 +334,16 @@ Persistent=true
 WantedBy=timers.target
 CLEANER_TIMER_EOF
 
-cat > /etc/systemd/system/strfry-1059-retention.service << RETENTION_SERVICE_EOF
-[Unit]
-Description=Delete old kind 1059 events from strfry
-After=network-online.target strfry.service
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-User=strfry
-Group=strfry
-ExecStart=${STRFRY_RETENTION_PATH} --strfry-bin /usr/local/bin/strfry --max-age-seconds 86400 --kind 1059
-NoNewPrivileges=yes
-ProtectHome=yes
-ProtectSystem=full
-ReadWritePaths=/var/lib/strfry
-RETENTION_SERVICE_EOF
-
-cat > /etc/systemd/system/strfry-1059-retention.timer << 'RETENTION_TIMER_EOF'
-[Unit]
-Description=Run strfry kind 1059 retention cleanup daily
-
-[Timer]
-OnBootSec=15m
-OnUnitActiveSec=1d
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-RETENTION_TIMER_EOF
+systemctl disable --now strfry-1059-retention.timer 2>/dev/null || true
+systemctl disable --now strfry-1059-retention.service 2>/dev/null || true
+rm -f /etc/systemd/system/strfry-1059-retention.timer
+rm -f /etc/systemd/system/strfry-1059-retention.service
 
 systemctl daemon-reload
 systemctl enable strfry
 systemctl enable cvm-announcement-cleaner.timer
-systemctl enable strfry-1059-retention.timer
 systemctl restart strfry
 systemctl restart cvm-announcement-cleaner.timer
-systemctl restart strfry-1059-retention.timer
 
 echo "--- strfry service deployment complete ---"
 echo "Binary:  ${STRFRY_BINARY_PATH}"
@@ -382,13 +351,9 @@ echo "Cleaner: ${ANNOUNCEMENT_CLEANER_BINARY_PATH}"
 echo "Config:  ${STRFRY_CONFIG}"
 echo "DB:      ${STRFRY_DB_DIR}"
 echo "Plugin:  ${STRFRY_PLUGIN_PATH}"
-echo "Retention: ${STRFRY_RETENTION_PATH}"
 echo "Logs:    journalctl -u strfry -f"
 echo "Cleaner Logs: journalctl -u cvm-announcement-cleaner -f"
-echo "Retention Logs: journalctl -u strfry-1059-retention -f"
 echo "Status:  systemctl status strfry"
 echo "Cleaner Service Status: systemctl status cvm-announcement-cleaner"
 echo "Cleaner Timer Status: systemctl status cvm-announcement-cleaner.timer"
 echo "Cleaner Schedule: systemctl list-timers cvm-announcement-cleaner.timer"
-echo "Retention Timer Status: systemctl status strfry-1059-retention.timer"
-echo "Retention Schedule: systemctl list-timers strfry-1059-retention.timer"
