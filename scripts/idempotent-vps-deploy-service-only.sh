@@ -101,6 +101,20 @@ checkout_repo_ref() {
     return 1
 }
 
+prepare_build_tree() {
+    if [ -d "$STRFRY_BUILD_DIR/.git" ]; then
+        cd "$STRFRY_BUILD_DIR"
+        checkout_repo_ref
+    else
+        rm -rf "$STRFRY_BUILD_DIR"
+        git clone --branch "$REPO_REF" "$STRFRY_REPO_URL" "$STRFRY_BUILD_DIR"
+        cd "$STRFRY_BUILD_DIR"
+    fi
+
+    git submodule update --init --recursive
+    make setup-golpe
+}
+
 install_cleaner_binary() {
     local asset_name
     asset_name="${ANNOUNCEMENT_CLEANER_ASSET_BASENAME}"
@@ -112,6 +126,7 @@ install_cleaner_binary() {
     fi
 
     echo "Prebuilt cleaner binary could not be installed for release ${REPO_REF}; falling back to local cargo build"
+    prepare_build_tree
     cargo build --manifest-path "$STRFRY_BUILD_DIR/tools/cvm-announcement-cleaner/Cargo.toml" --release
     cp "$STRFRY_BUILD_DIR/tools/cvm-announcement-cleaner/target/release/cvm-announcement-cleaner" "$ANNOUNCEMENT_CLEANER_BINARY_PATH"
     chmod 0755 "$ANNOUNCEMENT_CLEANER_BINARY_PATH"
@@ -128,6 +143,7 @@ install_strfry_binary() {
     fi
 
     echo "Prebuilt strfry binary could not be installed for release ${REPO_REF}; falling back to local make build"
+    prepare_build_tree
     make -j"$(nproc)"
     cp "$STRFRY_BUILD_DIR/strfry" "$STRFRY_BINARY_PATH"
     chmod 0755 "$STRFRY_BINARY_PATH"
@@ -163,21 +179,6 @@ mkdir -p "$STRFRY_HOME" "$STRFRY_DB_DIR" "$STRFRY_PLUGIN_DIR"
 chown -R "$STRFRY_USER":"$STRFRY_GROUP" "$STRFRY_HOME"
 chmod 0750 "$STRFRY_DB_DIR"
 chmod 0755 "$STRFRY_PLUGIN_DIR"
-
-if [ -d "$STRFRY_BUILD_DIR/.git" ]; then
-    cd "$STRFRY_BUILD_DIR"
-    checkout_repo_ref
-    git submodule update --init --recursive
-else
-    rm -rf "$STRFRY_BUILD_DIR"
-    git clone --branch "$REPO_REF" "$STRFRY_REPO_URL" "$STRFRY_BUILD_DIR"
-    cd "$STRFRY_BUILD_DIR"
-    git submodule update --init --recursive
-    make setup-golpe
-fi
-
-cd "$STRFRY_BUILD_DIR"
-make setup-golpe
 
 if systemctl list-unit-files strfry.service --no-legend 2>/dev/null | grep -q '^strfry\.service'; then
     systemctl stop strfry || true
