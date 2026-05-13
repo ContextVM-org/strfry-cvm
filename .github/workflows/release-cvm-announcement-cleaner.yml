@@ -1,0 +1,56 @@
+name: release-cvm-announcement-cleaner
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+    env:
+      ASSET_NAME: cvm-announcement-cleaner-linux-amd64
+    steps:
+      - name: Checkout strfry-cvm
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential git g++ make pkg-config libtool ca-certificates curl \
+            libssl-dev zlib1g-dev liblmdb-dev libflatbuffers-dev libsecp256k1-dev libzstd-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            tools/cvm-announcement-cleaner -> tools/cvm-announcement-cleaner/target
+
+      - name: Build cleaner release binary
+        run: |
+          git submodule update --init --recursive
+          make setup-golpe
+          cargo build --manifest-path tools/cvm-announcement-cleaner/Cargo.toml --release
+          install -m 0755 tools/cvm-announcement-cleaner/target/release/cvm-announcement-cleaner "./${ASSET_NAME}"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ASSET_NAME }}
+          path: ./${{ env.ASSET_NAME }}
+
+      - name: Upload binary to GitHub release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./${{ env.ASSET_NAME }}

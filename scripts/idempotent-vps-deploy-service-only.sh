@@ -35,17 +35,87 @@ STRFRY_HOME="/var/lib/strfry"
 STRFRY_DB_DIR="${STRFRY_HOME}/db"
 STRFRY_PLUGIN_DIR="/opt/strfry/plugins"
 STRFRY_PLUGIN_PATH="${STRFRY_PLUGIN_DIR}/write-policy-allowed-kinds.pl"
+STRFRY_RETENTION_PATH="${STRFRY_PLUGIN_DIR}/cleanup-old-kind-1059.pl"
 STRFRY_CONFIG="/etc/strfry.conf"
 STRFRY_BUILD_DIR="/tmp/strfry-build"
+STRFRY_REPO_DIR_NAME="strfry-cvm"
+STRFRY_REPO_OWNER="ContextVM-org"
+STRFRY_REPO_NAME="strfry-cvm"
+STRFRY_GITHUB_BASE_URL="https://github.com/${STRFRY_REPO_OWNER}/${STRFRY_REPO_NAME}"
 STRFRY_BINARY_PATH="/usr/local/bin/strfry"
 ANNOUNCEMENT_CLEANER_BINARY_PATH="/usr/local/bin/cvm-announcement-cleaner"
 STRFRY_REPO_URL="https://github.com/hoytech/strfry.git"
+STRFRY_ASSET_BASENAME="strfry-linux-amd64"
+ANNOUNCEMENT_CLEANER_ASSET_BASENAME="cvm-announcement-cleaner-linux-amd64"
 
 echo "--- Starting service-only strfry deployment on ${HOST} ---"
 
+fetch_release_asset() {
+    local asset_name="$1"
+    local output_path="$2"
+    local ref_name="$3"
+    local api_url release_json asset_url tmp_file
+
+    api_url="https://api.github.com/repos/${STRFRY_REPO_OWNER}/${STRFRY_REPO_NAME}/releases/tags/${ref_name}"
+    release_json="$(curl -fsSL -H 'Accept: application/vnd.github+json' "$api_url" 2>/dev/null)" || return 1
+    asset_url="$(printf '%s\n' "$release_json" | python3 -c 'import json, sys
+data = json.load(sys.stdin)
+name = sys.argv[1]
+for asset in data.get("assets", []):
+    if asset.get("name") == name:
+        print(asset.get("browser_download_url", ""))
+        break
+' "$asset_name" 2>/dev/null)"
+
+    if [ -z "$asset_url" ]; then
+        return 1
+    fi
+
+    tmp_file="$(mktemp)"
+    if ! curl -fsSL "$asset_url" -o "$tmp_file"; then
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    install -m 0755 "$tmp_file" "$output_path"
+    rm -f "$tmp_file"
+}
+
+install_cleaner_binary() {
+    local asset_name
+    asset_name="${ANNOUNCEMENT_CLEANER_ASSET_BASENAME}"
+
+    echo "Attempting to fetch prebuilt cleaner binary from release ${REPO_REF}"
+    if fetch_release_asset "$asset_name" "$ANNOUNCEMENT_CLEANER_BINARY_PATH" "$REPO_REF"; then
+        echo "Installed prebuilt cleaner binary from ${STRFRY_GITHUB_BASE_URL} release ${REPO_REF}"
+        return 0
+    fi
+
+    echo "No matching prebuilt cleaner binary found for release ${REPO_REF}; falling back to local cargo build"
+    cargo build --manifest-path "$STRFRY_BUILD_DIR/tools/cvm-announcement-cleaner/Cargo.toml" --release
+    cp "$STRFRY_BUILD_DIR/tools/cvm-announcement-cleaner/target/release/cvm-announcement-cleaner" "$ANNOUNCEMENT_CLEANER_BINARY_PATH"
+    chmod 0755 "$ANNOUNCEMENT_CLEANER_BINARY_PATH"
+}
+
+install_strfry_binary() {
+    local asset_name
+    asset_name="${STRFRY_ASSET_BASENAME}"
+
+    echo "Attempting to fetch prebuilt strfry binary from release ${REPO_REF}"
+    if fetch_release_asset "$asset_name" "$STRFRY_BINARY_PATH" "$REPO_REF"; then
+        echo "Installed prebuilt strfry binary from ${STRFRY_GITHUB_BASE_URL} release ${REPO_REF}"
+        return 0
+    fi
+
+    echo "No matching prebuilt strfry binary found for release ${REPO_REF}; falling back to local make build"
+    make -j"$(nproc)"
+    cp "$STRFRY_BUILD_DIR/strfry" "$STRFRY_BINARY_PATH"
+    chmod 0755 "$STRFRY_BINARY_PATH"
+}
+
 apt-get update
 apt-get install -y --no-install-recommends \
-    ca-certificates git g++ make pkg-config libtool perl \
+    ca-certificates curl git g++ make pkg-config libtool perl python3 \
     libssl-dev zlib1g-dev liblmdb-dev libflatbuffers-dev \
     libsecp256k1-dev libzstd-dev
 
@@ -87,18 +157,15 @@ else
     make setup-golpe
 fi
 
-make -j"$(nproc)"
+cd "$STRFRY_BUILD_DIR"
+make setup-golpe
 
 if systemctl list-unit-files strfry.service --no-legend 2>/dev/null | grep -q '^strfry\.service'; then
     systemctl stop strfry || true
 fi
 
-cp "$STRFRY_BUILD_DIR/strfry" "$STRFRY_BINARY_PATH"
-chmod 0755 "$STRFRY_BINARY_PATH"
-
-cargo build --manifest-path "$STRFRY_BUILD_DIR/tools/cvm-announcement-cleaner/Cargo.toml" --release
-cp "$STRFRY_BUILD_DIR/tools/cvm-announcement-cleaner/target/release/cvm-announcement-cleaner" "$ANNOUNCEMENT_CLEANER_BINARY_PATH"
-chmod 0755 "$ANNOUNCEMENT_CLEANER_BINARY_PATH"
+install_strfry_binary
+install_cleaner_binary
 
 cat > "$STRFRY_PLUGIN_PATH" << 'PLUGIN_EOF'
 #!/usr/bin/env perl
@@ -155,6 +222,9 @@ PLUGIN_EOF
 
 chown root:"$STRFRY_GROUP" "$STRFRY_PLUGIN_PATH"
 chmod 0750 "$STRFRY_PLUGIN_PATH"
+
+install -m 0750 ./scripts/cleanup-old-kind-1059.pl "$STRFRY_RETENTION_PATH"
+chown root:"$STRFRY_GROUP" "$STRFRY_RETENTION_PATH"
 
 cat > "$STRFRY_CONFIG" << CONFIG_EOF
 db = "${STRFRY_DB_DIR}/"
@@ -248,11 +318,43 @@ Persistent=true
 WantedBy=timers.target
 CLEANER_TIMER_EOF
 
+cat > /etc/systemd/system/strfry-1059-retention.service << RETENTION_SERVICE_EOF
+[Unit]
+Description=Delete old kind 1059 events from strfry
+After=network-online.target strfry.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=strfry
+Group=strfry
+ExecStart=${STRFRY_RETENTION_PATH} --strfry-bin /usr/local/bin/strfry --max-age-seconds 86400 --kind 1059
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=full
+ReadWritePaths=/var/lib/strfry
+RETENTION_SERVICE_EOF
+
+cat > /etc/systemd/system/strfry-1059-retention.timer << 'RETENTION_TIMER_EOF'
+[Unit]
+Description=Run strfry kind 1059 retention cleanup daily
+
+[Timer]
+OnBootSec=15m
+OnUnitActiveSec=1d
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+RETENTION_TIMER_EOF
+
 systemctl daemon-reload
 systemctl enable strfry
 systemctl enable cvm-announcement-cleaner.timer
+systemctl enable strfry-1059-retention.timer
 systemctl restart strfry
 systemctl restart cvm-announcement-cleaner.timer
+systemctl restart strfry-1059-retention.timer
 
 echo "--- strfry service deployment complete ---"
 echo "Binary:  ${STRFRY_BINARY_PATH}"
@@ -260,9 +362,13 @@ echo "Cleaner: ${ANNOUNCEMENT_CLEANER_BINARY_PATH}"
 echo "Config:  ${STRFRY_CONFIG}"
 echo "DB:      ${STRFRY_DB_DIR}"
 echo "Plugin:  ${STRFRY_PLUGIN_PATH}"
+echo "Retention: ${STRFRY_RETENTION_PATH}"
 echo "Logs:    journalctl -u strfry -f"
 echo "Cleaner Logs: journalctl -u cvm-announcement-cleaner -f"
+echo "Retention Logs: journalctl -u strfry-1059-retention -f"
 echo "Status:  systemctl status strfry"
 echo "Cleaner Service Status: systemctl status cvm-announcement-cleaner"
 echo "Cleaner Timer Status: systemctl status cvm-announcement-cleaner.timer"
 echo "Cleaner Schedule: systemctl list-timers cvm-announcement-cleaner.timer"
+echo "Retention Timer Status: systemctl status strfry-1059-retention.timer"
+echo "Retention Schedule: systemctl list-timers strfry-1059-retention.timer"
