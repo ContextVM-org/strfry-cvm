@@ -291,7 +291,7 @@ After=network.target
 [Service]
 User=strfry
 Group=strfry
-ExecStart=/usr/local/bin/strfry relay --config /etc/strfry.conf
+ExecStart=/usr/local/bin/strfry --config /etc/strfry.conf relay
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536
