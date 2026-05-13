@@ -3,7 +3,15 @@ name: release-strfry
 on:
   release:
     types: [published]
+  push:
+    branches:
+      - master
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish the asset to (defaults to master release behavior when omitted by push)
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -33,6 +41,19 @@ jobs:
           make -j$(nproc)
           install -m 0755 ./strfry "./${ASSET_NAME}"
 
+      - name: Resolve release tag
+        id: release_meta
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "release" ]; then
+            tag="${{ github.event.release.tag_name }}"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
@@ -40,7 +61,9 @@ jobs:
           path: ./${{ env.ASSET_NAME }}
 
       - name: Upload binary to GitHub release
-        if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.release_meta.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          make_latest: true
           files: ./${{ env.ASSET_NAME }}

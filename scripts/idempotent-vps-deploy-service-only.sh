@@ -44,7 +44,7 @@ STRFRY_REPO_NAME="strfry-cvm"
 STRFRY_GITHUB_BASE_URL="https://github.com/${STRFRY_REPO_OWNER}/${STRFRY_REPO_NAME}"
 STRFRY_BINARY_PATH="/usr/local/bin/strfry"
 ANNOUNCEMENT_CLEANER_BINARY_PATH="/usr/local/bin/cvm-announcement-cleaner"
-STRFRY_REPO_URL="https://github.com/hoytech/strfry.git"
+STRFRY_REPO_URL="https://github.com/${STRFRY_REPO_OWNER}/${STRFRY_REPO_NAME}.git"
 STRFRY_ASSET_BASENAME="strfry-linux-amd64"
 ANNOUNCEMENT_CLEANER_ASSET_BASENAME="cvm-announcement-cleaner-linux-amd64"
 
@@ -79,6 +79,23 @@ for asset in data.get("assets", []):
 
     install -m 0755 "$tmp_file" "$output_path"
     rm -f "$tmp_file"
+}
+
+checkout_repo_ref() {
+    git fetch --force --tags origin
+
+    if git rev-parse -q --verify "refs/remotes/origin/${REPO_REF}" >/dev/null; then
+        git checkout -B deploy-ref "origin/${REPO_REF}"
+        return 0
+    fi
+
+    if git rev-parse -q --verify "refs/tags/${REPO_REF}" >/dev/null; then
+        git checkout -B deploy-ref "refs/tags/${REPO_REF}"
+        return 0
+    fi
+
+    echo "Could not resolve REPO_REF=${REPO_REF} as either a branch or a tag in ${STRFRY_REPO_URL}" >&2
+    return 1
 }
 
 install_cleaner_binary() {
@@ -146,8 +163,7 @@ chmod 0755 "$STRFRY_PLUGIN_DIR"
 
 if [ -d "$STRFRY_BUILD_DIR/.git" ]; then
     cd "$STRFRY_BUILD_DIR"
-    git fetch origin
-    git reset --hard "origin/$REPO_REF"
+    checkout_repo_ref
     git submodule update --init --recursive
 else
     rm -rf "$STRFRY_BUILD_DIR"
