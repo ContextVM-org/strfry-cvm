@@ -33,6 +33,7 @@ STRFRY_USER="strfry"
 STRFRY_GROUP="strfry"
 STRFRY_HOME="/var/lib/strfry"
 STRFRY_DB_DIR="${STRFRY_HOME}/db"
+ANNOUNCEMENT_CLEANER_STATE_FILE="${STRFRY_HOME}/cvm-announcement-cleaner-state.json"
 STRFRY_PLUGIN_DIR="/opt/strfry/plugins"
 STRFRY_PLUGIN_PATH="${STRFRY_PLUGIN_DIR}/write-policy-allowed-kinds.pl"
 STRFRY_CONFIG="/etc/strfry.conf"
@@ -180,6 +181,12 @@ chown -R "$STRFRY_USER":"$STRFRY_GROUP" "$STRFRY_HOME"
 chmod 0750 "$STRFRY_DB_DIR"
 chmod 0755 "$STRFRY_PLUGIN_DIR"
 
+if [ ! -f "$ANNOUNCEMENT_CLEANER_STATE_FILE" ]; then
+    echo '{}' > "$ANNOUNCEMENT_CLEANER_STATE_FILE"
+fi
+chown "$STRFRY_USER":"$STRFRY_GROUP" "$ANNOUNCEMENT_CLEANER_STATE_FILE"
+chmod 0640 "$ANNOUNCEMENT_CLEANER_STATE_FILE"
+
 if systemctl list-unit-files strfry.service --no-legend 2>/dev/null | grep -q '^strfry\.service'; then
     systemctl stop strfry || true
 fi
@@ -315,7 +322,7 @@ Wants=network-online.target
 User=strfry
 Group=strfry
 Type=oneshot
-ExecStart=/usr/local/bin/cvm-announcement-cleaner --strfry-bin /usr/local/bin/strfry --local-relay ws://127.0.0.1:7777 --failure-threshold 1 --rounds 1
+ExecStart=/usr/local/bin/cvm-announcement-cleaner --strfry-bin /usr/local/bin/strfry --state-file /var/lib/strfry/cvm-announcement-cleaner-state.json --local-relay ws://127.0.0.1:7777 --failure-threshold 3 --rounds 1
 NoNewPrivileges=yes
 ProtectHome=yes
 ProtectSystem=full
@@ -324,11 +331,11 @@ CLEANER_SERVICE_EOF
 
 cat > /etc/systemd/system/cvm-announcement-cleaner.timer << 'CLEANER_TIMER_EOF'
 [Unit]
-Description=Run ContextVM announcement cleaner hourly
+Description=Run ContextVM announcement cleaner every 3 hours
 
 [Timer]
 OnBootSec=10m
-OnUnitActiveSec=1h
+OnUnitActiveSec=3h
 Persistent=true
 
 [Install]
@@ -349,6 +356,7 @@ systemctl restart cvm-announcement-cleaner.timer
 echo "--- strfry service deployment complete ---"
 echo "Binary:  ${STRFRY_BINARY_PATH}"
 echo "Cleaner: ${ANNOUNCEMENT_CLEANER_BINARY_PATH}"
+echo "Cleaner state: ${ANNOUNCEMENT_CLEANER_STATE_FILE}"
 echo "Config:  ${STRFRY_CONFIG}"
 echo "DB:      ${STRFRY_DB_DIR}"
 echo "Plugin:  ${STRFRY_PLUGIN_PATH}"

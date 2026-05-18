@@ -109,7 +109,7 @@ The script is intended to be executed locally on the target VPS as root. It:
 * writes an hourly systemd timer at [`/etc/systemd/system/cvm-announcement-cleaner.timer`](scripts/idempotent-vps-deploy-service-only.sh)
 * writes [`/etc/strfry.conf`](README.md:95)
 * installs a Perl write-policy plugin that only accepts kinds `1059`, `21059`, `25910`, and the range `10000-19999`
-* enables an hourly cleanup timer that removes all locally stored events for dead ContextVM server pubkeys when they fail the scheduled probe run
+* enables a cleaner timer that tracks consecutive probe failures in a small JSON state file and removes all locally stored events for dead ContextVM server pubkeys only after the configured threshold is reached
 * assigns a built-in one-day retention period to kind `1059` events so they are deleted automatically by strfry's native expiration cleanup path
 
 Basic usage:
@@ -148,7 +148,7 @@ Re-running [`scripts/idempotent-vps-deploy-service-only.sh`](scripts/idempotent-
 
 The cleaner uses the fallback relay list documented in [`tools/cvm-announcement-cleaner/README.md`](tools/cvm-announcement-cleaner/README.md), including `wss://relay.damus.io`, `wss://relay.primal.net`, `wss://relay.nostr.net`, and `wss://nos.lol`, plus the local relay.
 
-The deployed timer runs the cleaner once per hour as a oneshot job with a single pass and immediate deletion threshold, equivalent to `--rounds 1 --failure-threshold 1`.
+The deployed timer runs the cleaner every three hours as a oneshot job with a single pass, persistent state at `/var/lib/strfry/cvm-announcement-cleaner-state.json`, and deletion after three failed runs, equivalent to `--rounds 1 --failure-threshold 3 --state-file /var/lib/strfry/cvm-announcement-cleaner-state.json`.
 
 Kind `1059` events now receive a default one-day expiration when ingested, so they are removed by strfry's built-in expiration cleanup without a separate retention script or timer.
 
