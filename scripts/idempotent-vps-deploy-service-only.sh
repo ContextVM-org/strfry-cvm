@@ -44,9 +44,11 @@ STRFRY_REPO_NAME="strfry-cvm"
 STRFRY_GITHUB_BASE_URL="https://github.com/${STRFRY_REPO_OWNER}/${STRFRY_REPO_NAME}"
 STRFRY_BINARY_PATH="/usr/local/bin/strfry"
 ANNOUNCEMENT_CLEANER_BINARY_PATH="/usr/local/bin/cvm-announcement-cleaner"
+ANNOUNCEMENT_CRAWLER_BINARY_PATH="/usr/local/bin/cvm-announcement-crawler"
 STRFRY_REPO_URL="https://github.com/${STRFRY_REPO_OWNER}/${STRFRY_REPO_NAME}.git"
 STRFRY_ASSET_BASENAME="strfry-linux-amd64"
 ANNOUNCEMENT_CLEANER_ASSET_BASENAME="cvm-announcement-cleaner-linux-amd64"
+ANNOUNCEMENT_CRAWLER_ASSET_BASENAME="cvm-announcement-crawler-linux-amd64"
 
 echo "--- Starting service-only strfry deployment on ${HOST} ---"
 
@@ -133,6 +135,23 @@ install_cleaner_binary() {
     chmod 0755 "$ANNOUNCEMENT_CLEANER_BINARY_PATH"
 }
 
+install_crawler_binary() {
+    local asset_name
+    asset_name="${ANNOUNCEMENT_CRAWLER_ASSET_BASENAME}"
+
+    echo "Attempting to fetch prebuilt crawler binary from release ${REPO_REF}"
+    if fetch_release_asset "$asset_name" "$ANNOUNCEMENT_CRAWLER_BINARY_PATH" "$REPO_REF"; then
+        echo "Installed prebuilt crawler binary from ${STRFRY_GITHUB_BASE_URL} release ${REPO_REF}"
+        return 0
+    fi
+
+    echo "Prebuilt crawler binary could not be installed for release ${REPO_REF}; falling back to local cargo build"
+    prepare_build_tree
+    cargo build --manifest-path "$STRFRY_BUILD_DIR/tools/cvm-announcement-crawler/Cargo.toml" --release
+    cp "$STRFRY_BUILD_DIR/tools/cvm-announcement-crawler/target/release/cvm-announcement-crawler" "$ANNOUNCEMENT_CRAWLER_BINARY_PATH"
+    chmod 0755 "$ANNOUNCEMENT_CRAWLER_BINARY_PATH"
+}
+
 install_strfry_binary() {
     local asset_name
     asset_name="${STRFRY_ASSET_BASENAME}"
@@ -193,6 +212,7 @@ fi
 
 install_strfry_binary
 install_cleaner_binary
+install_crawler_binary
 
 cat > "$STRFRY_PLUGIN_PATH" << 'PLUGIN_EOF'
 #!/usr/bin/env perl
@@ -342,6 +362,36 @@ Persistent=true
 WantedBy=timers.target
 CLEANER_TIMER_EOF
 
+cat > /etc/systemd/system/cvm-announcement-crawler.service << 'CRAWLER_SERVICE_EOF'
+[Unit]
+Description=ContextVM announcement crawler
+After=network-online.target strfry.service
+Wants=network-online.target
+
+[Service]
+User=strfry
+Group=strfry
+Type=oneshot
+ExecStart=/usr/local/bin/cvm-announcement-crawler --strfry-bin /usr/local/bin/strfry --local-relay ws://127.0.0.1:7777 --rounds 1
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=full
+ReadWritePaths=/var/lib/strfry
+CRAWLER_SERVICE_EOF
+
+cat > /etc/systemd/system/cvm-announcement-crawler.timer << 'CRAWLER_TIMER_EOF'
+[Unit]
+Description=Run ContextVM announcement crawler every 6 hours
+
+[Timer]
+OnBootSec=15m
+OnUnitActiveSec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+CRAWLER_TIMER_EOF
+
 systemctl disable --now strfry-1059-retention.timer 2>/dev/null || true
 systemctl disable --now strfry-1059-retention.service 2>/dev/null || true
 rm -f /etc/systemd/system/strfry-1059-retention.timer
@@ -350,19 +400,26 @@ rm -f /etc/systemd/system/strfry-1059-retention.service
 systemctl daemon-reload
 systemctl enable strfry
 systemctl enable cvm-announcement-cleaner.timer
+systemctl enable cvm-announcement-crawler.timer
 systemctl restart strfry
 systemctl restart cvm-announcement-cleaner.timer
+systemctl restart cvm-announcement-crawler.timer
 
 echo "--- strfry service deployment complete ---"
-echo "Binary:  ${STRFRY_BINARY_PATH}"
-echo "Cleaner: ${ANNOUNCEMENT_CLEANER_BINARY_PATH}"
+echo "Binary:   ${STRFRY_BINARY_PATH}"
+echo "Cleaner:  ${ANNOUNCEMENT_CLEANER_BINARY_PATH}"
+echo "Crawler:  ${ANNOUNCEMENT_CRAWLER_BINARY_PATH}"
 echo "Cleaner state: ${ANNOUNCEMENT_CLEANER_STATE_FILE}"
-echo "Config:  ${STRFRY_CONFIG}"
-echo "DB:      ${STRFRY_DB_DIR}"
-echo "Plugin:  ${STRFRY_PLUGIN_PATH}"
-echo "Logs:    journalctl -u strfry -f"
-echo "Cleaner Logs: journalctl -u cvm-announcement-cleaner -f"
-echo "Status:  systemctl status strfry"
+echo "Config:   ${STRFRY_CONFIG}"
+echo "DB:       ${STRFRY_DB_DIR}"
+echo "Plugin:   ${STRFRY_PLUGIN_PATH}"
+echo "Logs:     journalctl -u strfry -f"
+echo "Cleaner Logs:  journalctl -u cvm-announcement-cleaner -f"
+echo "Crawler Logs:  journalctl -u cvm-announcement-crawler -f"
+echo "Status:   systemctl status strfry"
 echo "Cleaner Service Status: systemctl status cvm-announcement-cleaner"
-echo "Cleaner Timer Status: systemctl status cvm-announcement-cleaner.timer"
-echo "Cleaner Schedule: systemctl list-timers cvm-announcement-cleaner.timer"
+echo "Cleaner Timer Status:   systemctl status cvm-announcement-cleaner.timer"
+echo "Cleaner Schedule:       systemctl list-timers cvm-announcement-cleaner.timer"
+echo "Crawler Service Status: systemctl status cvm-announcement-crawler"
+echo "Crawler Timer Status:   systemctl status cvm-announcement-crawler.timer"
+echo "Crawler Schedule:       systemctl list-timers cvm-announcement-crawler.timer"

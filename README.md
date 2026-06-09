@@ -104,12 +104,17 @@ The script is intended to be executed locally on the target VPS as root. It:
 * installs the relay binary to [`/usr/local/bin/strfry`](README.md)
 * first attempts to download a prebuilt [`cvm-announcement-cleaner`](tools/cvm-announcement-cleaner/src/main.rs:63) release binary from [`ContextVM-org/strfry-cvm`](README.md:98), then falls back to a local Cargo build if that artifact is unavailable
 * installs [`cvm-announcement-cleaner`](tools/cvm-announcement-cleaner/src/main.rs:63) to [`/usr/local/bin/cvm-announcement-cleaner`](scripts/idempotent-vps-deploy-service-only.sh)
+* first attempts to download a prebuilt [`cvm-announcement-crawler`](tools/cvm-announcement-crawler/src/main.rs:65) release binary from [`ContextVM-org/strfry-cvm`](README.md:98), then falls back to a local Cargo build if that artifact is unavailable
+* installs [`cvm-announcement-crawler`](tools/cvm-announcement-crawler/src/main.rs:65) to [`/usr/local/bin/cvm-announcement-crawler`](scripts/idempotent-vps-deploy-service-only.sh)
 * writes a systemd unit at [`/etc/systemd/system/strfry.service`](README.md)
 * writes a oneshot systemd service at [`/etc/systemd/system/cvm-announcement-cleaner.service`](scripts/idempotent-vps-deploy-service-only.sh)
 * writes an hourly systemd timer at [`/etc/systemd/system/cvm-announcement-cleaner.timer`](scripts/idempotent-vps-deploy-service-only.sh)
+* writes a oneshot systemd service at [`/etc/systemd/system/cvm-announcement-crawler.service`](scripts/idempotent-vps-deploy-service-only.sh)
+* writes a 6-hourly systemd timer at [`/etc/systemd/system/cvm-announcement-crawler.timer`](scripts/idempotent-vps-deploy-service-only.sh)
 * writes [`/etc/strfry.conf`](README.md:95)
 * installs a Perl write-policy plugin that only accepts kinds `1059`, `21059`, `25910`, and the range `10000-19999`
 * enables a cleaner timer that tracks consecutive probe failures in a small JSON state file and removes all locally stored events for dead ContextVM server pubkeys only after the configured threshold is reached
+* enables a crawler timer that discovers server announcements from external relays, probes candidate servers, and imports all events from healthy servers into the local database
 * assigns a built-in one-day retention period to kind `1059` events so they are deleted automatically by strfry's native expiration cleanup path
 
 Basic usage:
@@ -143,12 +148,20 @@ Useful follow-up commands:
     systemctl status cvm-announcement-cleaner.timer
     journalctl -u cvm-announcement-cleaner -f
     systemctl list-timers cvm-announcement-cleaner.timer
+    systemctl status cvm-announcement-crawler
+    systemctl status cvm-announcement-crawler.timer
+    journalctl -u cvm-announcement-crawler -f
+    systemctl list-timers cvm-announcement-crawler.timer
 
-Re-running [`scripts/idempotent-vps-deploy-service-only.sh`](scripts/idempotent-vps-deploy-service-only.sh) is safe: it refreshes the config and plugin, tries to fetch prebuilt [`strfry`](README.md:87) and [`cvm-announcement-cleaner`](tools/cvm-announcement-cleaner/src/main.rs:63) binaries from the [`strfry-cvm`](README.md:98) GitHub release matching `REPO_REF`, falls back to a local source build when needed, and restarts the services if they already exist.
+Re-running [`scripts/idempotent-vps-deploy-service-only.sh`](scripts/idempotent-vps-deploy-service-only.sh) is safe: it refreshes the config and plugin, tries to fetch prebuilt [`strfry`](README.md:87), [`cvm-announcement-cleaner`](tools/cvm-announcement-cleaner/src/main.rs:63), and [`cvm-announcement-crawler`](tools/cvm-announcement-crawler/src/main.rs:65) binaries from the [`strfry-cvm`](README.md:98) GitHub release matching `REPO_REF`, falls back to a local source build when needed, and restarts the services if they already exist.
 
-The cleaner uses the fallback relay list documented in [`tools/cvm-announcement-cleaner/README.md`](tools/cvm-announcement-cleaner/README.md), including `wss://relay.damus.io`, `wss://relay.primal.net`, `wss://relay.nostr.net`, and `wss://nos.lol`, plus the local relay.
+Both the cleaner and crawler use the same expanded fallback relay list defined in their source code, including `wss://relay.damus.io`, `wss://relay.primal.net`, `wss://relay.nostr.net`, `wss://nos.lol`, `wss://nostr.bitcoiner.social`, `wss://nostr.oxtr.dev`, `wss://offchain.pub`, `wss://nostr.mom`, `wss://nostr.wine`, `wss://relay.ditto.pub`, and `wss://purplepag.es`, plus the local relay.
 
-The deployed timer runs the cleaner every three hours as a oneshot job with a single pass, persistent state at `/var/lib/strfry/cvm-announcement-cleaner-state.json`, and deletion after three failed runs, equivalent to `--rounds 1 --failure-threshold 3 --state-file /var/lib/strfry/cvm-announcement-cleaner-state.json`.
+The crawler uses the same fallback relay list for discovery and event download. See [`tools/cvm-announcement-crawler/README.md`](tools/cvm-announcement-crawler/README.md) for details.
+
+The deployed cleaner timer runs the cleaner every three hours as a oneshot job with a single pass, persistent state at `/var/lib/strfry/cvm-announcement-cleaner-state.json`, and deletion after three failed runs, equivalent to `--rounds 1 --failure-threshold 3 --state-file /var/lib/strfry/cvm-announcement-cleaner-state.json`.
+
+The deployed crawler timer runs the crawler every six hours as a oneshot job with a single pass, equivalent to `--rounds 1`.
 
 Kind `1059` events now receive a default one-day expiration when ingested, so they are removed by strfry's built-in expiration cleanup without a separate retention script or timer.
 

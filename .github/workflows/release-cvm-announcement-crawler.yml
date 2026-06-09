@@ -1,0 +1,79 @@
+name: release-cvm-announcement-crawler
+
+on:
+  release:
+    types: [published]
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish the asset to (defaults to master release behavior when omitted by push)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+    env:
+      ASSET_NAME: cvm-announcement-crawler-linux-amd64
+    steps:
+      - name: Checkout strfry-cvm
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential git g++ make pkg-config libtool ca-certificates curl \
+            libssl-dev zlib1g-dev liblmdb-dev libflatbuffers-dev libsecp256k1-dev libzstd-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            tools/cvm-announcement-crawler -> tools/cvm-announcement-crawler/target
+
+      - name: Build crawler release binary
+        run: |
+          git submodule update --init --recursive
+          make setup-golpe
+          cargo build --manifest-path tools/cvm-announcement-crawler/Cargo.toml --release
+          install -m 0755 tools/cvm-announcement-crawler/target/release/cvm-announcement-crawler "./${ASSET_NAME}"
+
+      - name: Resolve release tag
+        id: release_meta
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "release" ]; then
+            tag="${{ github.event.release.tag_name }}"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ASSET_NAME }}
+          path: ./${{ env.ASSET_NAME }}
+
+      - name: Upload binary to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_meta.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          files: ./${{ env.ASSET_NAME }}

@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
@@ -10,18 +9,16 @@ use contextvm_sdk::proxy::{NostrMCPProxy, ProxyConfig};
 use contextvm_sdk::signer;
 use contextvm_sdk::transport::client::NostrClientTransportConfig;
 use nostr_sdk::prelude::*;
-use serde::Deserialize;
 use tokio::process::Command;
 use tokio::time::{sleep, timeout};
 
 const DEFAULT_LOCAL_RELAY: &str = "ws://127.0.0.1:7777";
 const DEFAULT_STRFRY_BIN: &str = "./strfry";
-const DEFAULT_STATE_FILE: &str = "/var/lib/strfry/cvm-announcement-cleaner-state.json";
 const DEFAULT_TIMEOUT_SECS: u64 = 10;
-const DEFAULT_FAILURE_THRESHOLD: u32 = 3;
 const DEFAULT_INTERVAL_SECS: u64 = 3600;
 const RELAY_LIST_KIND: u16 = 10002;
 const SERVER_ANNOUNCEMENT_KIND: u16 = 11316;
+const CRAWL_KINDS: [u16; 5] = [11316, 11317, 11318, 11319, 11320];
 const FALLBACK_RELAYS: [&str; 11] = [
     "wss://relay.damus.io",
     "wss://relay.primal.net",
@@ -39,34 +36,12 @@ const FALLBACK_RELAYS: [&str; 11] = [
 #[derive(Debug, Clone)]
 struct Config {
     strfry_bin: PathBuf,
-    state_file: PathBuf,
     local_relay: String,
-    relay_list_sources: Vec<String>,
+    source_relays: Vec<String>,
     timeout: Duration,
-    failure_threshold: u32,
     rounds: u32,
     interval: Duration,
     dry_run: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct AnnouncementEvent {
-    pubkey: String,
-    kind: u16,
-}
-
-#[derive(Debug, Clone)]
-struct RelayListResult {
-    relays: Vec<String>,
-    source_relays: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-struct ProbeOutcome {
-    alive: bool,
-    attempted_relays: Vec<String>,
-    success_relay: Option<String>,
-    reason: String,
 }
 
 #[tokio::main]
@@ -76,20 +51,15 @@ async fn main() -> Result<()> {
 
     tracing::info!(
         strfry_bin = %config.strfry_bin.display(),
-        state_file = %config.state_file.display(),
         local_relay = %config.local_relay,
         rounds = config.rounds,
-        failure_threshold = config.failure_threshold,
         dry_run = config.dry_run,
-        "starting announcement cleaner"
+        "starting announcement crawler"
     );
 
-    let mut failures = load_failure_state(&config.state_file)?;
-
     for round in 1..=config.rounds {
-        tracing::info!(round, total_rounds = config.rounds, "starting cleanup round");
-        run_round(&config, &mut failures).await?;
-        save_failure_state(&config.state_file, &failures)?;
+        tracing::info!(round, total_rounds = config.rounds, "starting crawl round");
+        run_round(&config).await?;
 
         if round < config.rounds {
             tracing::info!(
@@ -101,18 +71,16 @@ async fn main() -> Result<()> {
         }
     }
 
-    tracing::info!("cleanup run complete");
+    tracing::info!("crawl run complete");
     Ok(())
 }
 
 impl Config {
     fn from_env() -> Result<Self> {
         let mut strfry_bin = PathBuf::from(DEFAULT_STRFRY_BIN);
-        let mut state_file = PathBuf::from(DEFAULT_STATE_FILE);
         let mut local_relay = DEFAULT_LOCAL_RELAY.to_string();
         let mut timeout = Duration::from_secs(DEFAULT_TIMEOUT_SECS);
-        let mut failure_threshold = DEFAULT_FAILURE_THRESHOLD;
-        let mut rounds = DEFAULT_FAILURE_THRESHOLD;
+        let mut rounds: u32 = 1;
         let mut interval = Duration::from_secs(DEFAULT_INTERVAL_SECS);
         let mut dry_run = false;
 
@@ -125,20 +93,12 @@ impl Config {
                 "--local-relay" => {
                     local_relay = next_arg(&mut args, "--local-relay")?;
                 }
-                "--state-file" => {
-                    state_file = PathBuf::from(next_arg(&mut args, "--state-file")?);
-                }
                 "--timeout-seconds" => {
                     timeout = Duration::from_secs(
                         next_arg(&mut args, "--timeout-seconds")?
                             .parse()
                             .context("invalid --timeout-seconds")?,
                     );
-                }
-                "--failure-threshold" => {
-                    failure_threshold = next_arg(&mut args, "--failure-threshold")?
-                        .parse()
-                        .context("invalid --failure-threshold")?;
                 }
                 "--rounds" => {
                     rounds = next_arg(&mut args, "--rounds")?
@@ -165,20 +125,14 @@ impl Config {
             bail!("--rounds must be greater than zero");
         }
 
-        if failure_threshold == 0 {
-            bail!("--failure-threshold must be greater than zero");
-        }
-
-        let mut relay_list_sources = vec![local_relay.clone()];
-        relay_list_sources.extend(FALLBACK_RELAYS.iter().map(|relay| relay.to_string()));
+        let mut source_relays = vec![local_relay.clone()];
+        source_relays.extend(FALLBACK_RELAYS.iter().map(|relay| relay.to_string()));
 
         Ok(Self {
             strfry_bin,
-            state_file,
             local_relay,
-            relay_list_sources,
+            source_relays,
             timeout,
-            failure_threshold,
             rounds,
             interval,
             dry_run,
@@ -186,101 +140,158 @@ impl Config {
     }
 }
 
-async fn run_round(config: &Config, failures: &mut BTreeMap<String, u32>) -> Result<()> {
-    let announcements = scan_announcements(&config.strfry_bin).await?;
-    let current_pubkeys: BTreeSet<String> = announcements.iter().map(|event| event.pubkey.clone()).collect();
+async fn run_round(config: &Config) -> Result<()> {
+    // 1. Discover server pubkeys from external relays (kind 11316)
+    let discovered = discover_pubkeys(&config.source_relays, config.timeout).await?;
+    tracing::info!(count = discovered.len(), "discovered server pubkeys from source relays");
 
-    failures.retain(|pubkey, _| current_pubkeys.contains(pubkey));
+    if discovered.is_empty() {
+        tracing::info!("no server pubkeys discovered, nothing to do");
+        return Ok(());
+    }
 
-    tracing::info!(count = announcements.len(), "loaded local server announcements");
+    // 2. Probe each pubkey to find healthy servers
+    let mut healthy = BTreeSet::new();
+    let mut dead = BTreeSet::new();
 
-    for announcement in announcements {
-        let relay_list = fetch_relay_list(&announcement.pubkey, &config.relay_list_sources, config.timeout)
+    for (pubkey_hex, announcement_relays) in &discovered {
+        let relay_list = fetch_relay_list(pubkey_hex, &config.source_relays, config.timeout)
             .await
-            .with_context(|| format!("failed to fetch relay list for {}", announcement.pubkey))?;
+            .with_context(|| format!("failed to fetch relay list for {pubkey_hex}"))?;
 
-        let probe_targets = if relay_list.relays.is_empty() {
-            vec![config.local_relay.clone()]
+        let probe_targets = if relay_list.is_empty() {
+            // Fall back to local relay + relays where the announcement was found
+            let mut fallback = vec![config.local_relay.clone()];
+            fallback.extend(announcement_relays.iter().cloned());
+            fallback
         } else {
-            relay_list.relays.clone()
+            relay_list
         };
 
-        let outcome = probe_server(&announcement.pubkey, &probe_targets, config.timeout).await;
+        let outcome = probe_server(pubkey_hex, &probe_targets, config.timeout).await;
 
         if outcome.alive {
-            failures.remove(&announcement.pubkey);
             tracing::info!(
-                pubkey = %announcement.pubkey,
+                pubkey = %pubkey_hex,
                 success_relay = ?outcome.success_relay,
-                source_relays = ?relay_list.source_relays,
                 "server is alive"
             );
-            continue;
+            healthy.insert(pubkey_hex.clone());
+        } else {
+            tracing::warn!(
+                pubkey = %pubkey_hex,
+                attempted_relays = ?outcome.attempted_relays,
+                reason = %outcome.reason,
+                "server probe failed, skipping"
+            );
+            dead.insert(pubkey_hex.clone());
         }
+    }
 
-        let failure_count = failures.entry(announcement.pubkey.clone()).or_insert(0);
-        *failure_count += 1;
+    tracing::info!(
+        healthy = healthy.len(),
+        dead = dead.len(),
+        "probe results"
+    );
 
-        tracing::warn!(
-            pubkey = %announcement.pubkey,
-            failure_count = *failure_count,
-            threshold = config.failure_threshold,
-            attempted_relays = ?outcome.attempted_relays,
-            reason = %outcome.reason,
-            "server probe failed"
-        );
-
-        if *failure_count >= config.failure_threshold {
-            delete_announcement_family(config, &announcement.pubkey).await?;
-            failures.remove(&announcement.pubkey);
+    // 3. Download announcement-related events from healthy pubkeys and import
+    for pubkey_hex in &healthy {
+        match download_and_import_pubkey_events(config, pubkey_hex).await {
+            Ok(imported) => {
+                tracing::info!(
+                    pubkey = %pubkey_hex,
+                    imported,
+                    "imported events for pubkey"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    pubkey = %pubkey_hex,
+                    error = %error,
+                    "failed to download/import events for pubkey"
+                );
+            }
         }
     }
 
     Ok(())
 }
 
-async fn scan_announcements(strfry_bin: &PathBuf) -> Result<Vec<AnnouncementEvent>> {
-    let filter = format!(r#"{{"kinds":[{SERVER_ANNOUNCEMENT_KIND}]}}"#);
-    let output = Command::new(strfry_bin)
-        .arg("scan")
-        .arg(filter)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .with_context(|| format!("failed to execute {} scan", strfry_bin.display()))?;
+/// Discover server pubkeys by querying source relays for kind 11316 events.
+/// Returns a map from pubkey hex to the set of source relay URLs where the announcement was found.
+async fn discover_pubkeys(
+    source_relays: &[String],
+    timeout_duration: Duration,
+) -> Result<BTreeMap<String, BTreeSet<String>>> {
+    let mut map: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
-    if !output.status.success() {
-        bail!(
-            "strfry scan failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
-    let stdout = String::from_utf8(output.stdout).context("strfry scan output was not valid UTF-8")?;
-    let mut announcements = Vec::new();
-
-    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
-        let event: AnnouncementEvent = serde_json::from_str(line)
-            .with_context(|| format!("failed to parse announcement event: {line}"))?;
-        if event.kind == SERVER_ANNOUNCEMENT_KIND {
-            announcements.push(event);
+    for relay_url in source_relays {
+        match fetch_announcement_pubkeys(relay_url, timeout_duration).await {
+            Ok(pubkeys) => {
+                tracing::debug!(
+                    relay = %relay_url,
+                    count = pubkeys.len(),
+                    "fetched announcement pubkeys from relay"
+                );
+                for pk in pubkeys {
+                    map.entry(pk).or_default().insert(relay_url.clone());
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    relay = %relay_url,
+                    error = %error,
+                    "failed to fetch announcements from relay"
+                );
+            }
         }
     }
 
-    Ok(announcements)
+    Ok(map)
 }
 
-async fn fetch_relay_list(pubkey_hex: &str, sources: &[String], timeout_duration: Duration) -> Result<RelayListResult> {
+async fn fetch_announcement_pubkeys(
+    relay_url: &str,
+    timeout_duration: Duration,
+) -> Result<BTreeSet<String>> {
+    let client = Client::default();
+    client
+        .add_relay(relay_url)
+        .await
+        .with_context(|| format!("failed to add relay {relay_url}"))?;
+    client.connect().await;
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(SERVER_ANNOUNCEMENT_KIND))
+        .limit(500);
+
+    let events = client
+        .fetch_events(filter, timeout_duration)
+        .await
+        .with_context(|| format!("failed to fetch announcements from {relay_url}"))?;
+
+    let _ = client.disconnect().await;
+
+    let pubkeys: BTreeSet<String> = events
+        .into_iter()
+        .map(|event| event.pubkey.to_hex())
+        .collect();
+
+    Ok(pubkeys)
+}
+
+async fn fetch_relay_list(
+    pubkey_hex: &str,
+    sources: &[String],
+    timeout_duration: Duration,
+) -> Result<Vec<String>> {
     let pubkey = PublicKey::from_hex(pubkey_hex)
         .with_context(|| format!("invalid server pubkey: {pubkey_hex}"))?;
     let mut latest_event: Option<Event> = None;
-    let mut source_relays = Vec::new();
 
     for source in sources {
         match fetch_latest_relay_list_from_source(pubkey, source, timeout_duration).await {
             Ok(Some(event)) => {
-                source_relays.push(source.clone());
                 let replace = latest_event
                     .as_ref()
                     .map(|current| event.created_at > current.created_at)
@@ -296,12 +307,10 @@ async fn fetch_relay_list(pubkey_hex: &str, sources: &[String], timeout_duration
         }
     }
 
-    let relays = latest_event
+    Ok(latest_event
         .as_ref()
         .map(extract_relays)
-        .unwrap_or_default();
-
-    Ok(RelayListResult { relays, source_relays })
+        .unwrap_or_default())
 }
 
 async fn fetch_latest_relay_list_from_source(
@@ -345,6 +354,13 @@ fn extract_relays(event: &Event) -> Vec<String> {
     }
 
     relays.into_iter().collect()
+}
+
+struct ProbeOutcome {
+    alive: bool,
+    attempted_relays: Vec<String>,
+    success_relay: Option<String>,
+    reason: String,
 }
 
 async fn probe_server(pubkey_hex: &str, relays: &[String], timeout_duration: Duration) -> ProbeOutcome {
@@ -404,37 +420,124 @@ async fn probe_server_once(pubkey_hex: &str, relay: &str, timeout_duration: Dura
 
     match received {
         Some(JsonRpcMessage::Response(_)) => Ok(()),
-        Some(other) => Err(anyhow!("unexpected message: {}", serde_json::to_string(&other)?)),
+        Some(other) => Err(anyhow!(
+            "unexpected message: {}",
+            serde_json::to_string(&other)?
+        )),
         None => Err(anyhow!("server closed response channel without replying")),
     }
 }
 
-async fn delete_announcement_family(config: &Config, pubkey_hex: &str) -> Result<()> {
-    let filter = format!(r#"{{"authors":["{pubkey_hex}"]}}"#);
+/// Download announcement-related events authored by a pubkey from source relays and import them into the local strfry.
+async fn download_and_import_pubkey_events(config: &Config, pubkey_hex: &str) -> Result<usize> {
+    let pubkey = PublicKey::from_hex(pubkey_hex)
+        .with_context(|| format!("invalid pubkey: {pubkey_hex}"))?;
 
-    if config.dry_run {
-        tracing::warn!(pubkey = %pubkey_hex, filter = %filter, "dry run: would delete all events for pubkey");
-        return Ok(());
+    // Collect events from all source relays, deduplicating by event ID
+    let mut seen_ids = BTreeSet::new();
+    let mut events_jsonl = Vec::new();
+
+    for relay_url in &config.source_relays {
+        match fetch_pubkey_events(pubkey, relay_url, config.timeout).await {
+            Ok(events) => {
+                for event in events {
+                    let id_hex = event.id.to_hex();
+                    if seen_ids.insert(id_hex) {
+                        let json = serde_json::to_string(&event)
+                            .context("failed to serialize event")?;
+                        events_jsonl.push(json);
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    relay = %relay_url,
+                    pubkey = %pubkey_hex,
+                    error = %error,
+                    "failed to fetch events from relay"
+                );
+            }
+        }
     }
 
-    let output = Command::new(&config.strfry_bin)
-        .arg("delete")
-        .arg("--filter")
-        .arg(filter)
+    if events_jsonl.is_empty() {
+        tracing::info!(pubkey = %pubkey_hex, "no events found for pubkey");
+        return Ok(0);
+    }
+
+    let count = events_jsonl.len();
+
+    if config.dry_run {
+        tracing::warn!(
+            pubkey = %pubkey_hex,
+            count,
+            "dry run: would import events for pubkey"
+        );
+        return Ok(count);
+    }
+
+    import_events(&config.strfry_bin, &events_jsonl).await?;
+
+    Ok(count)
+}
+
+async fn fetch_pubkey_events(
+    pubkey: PublicKey,
+    relay_url: &str,
+    timeout_duration: Duration,
+) -> Result<Vec<Event>> {
+    let client = Client::default();
+    client
+        .add_relay(relay_url)
+        .await
+        .with_context(|| format!("failed to add relay {relay_url}"))?;
+    client.connect().await;
+
+    let kinds: Vec<Kind> = CRAWL_KINDS.iter().map(|k| Kind::Custom(*k)).collect();
+    let filter = Filter::new()
+        .author(pubkey)
+        .kinds(kinds)
+        .limit(500);
+
+    let fetched = client
+        .fetch_events(filter, timeout_duration)
+        .await
+        .with_context(|| format!("failed to fetch events for {pubkey} from {relay_url}"))?;
+
+    let _ = client.disconnect().await;
+
+    let events: Vec<Event> = fetched.into_iter().collect();
+    Ok(events)
+}
+
+async fn import_events(strfry_bin: &PathBuf, events: &[String]) -> Result<()> {
+    let input = events.join("\n") + "\n";
+
+    let mut child = Command::new(strfry_bin)
+        .arg("import")
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        .spawn()
+        .with_context(|| format!("failed to spawn {} import", strfry_bin.display()))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        stdin.write_all(input.as_bytes()).await.context("failed to write events to strfry import stdin")?;
+    }
+
+    let output = child
+        .wait_with_output()
         .await
-        .with_context(|| format!("failed to execute {} delete", config.strfry_bin.display()))?;
+        .with_context(|| format!("failed to wait for {} import", strfry_bin.display()))?;
 
     if !output.status.success() {
         bail!(
-            "strfry delete failed for {pubkey_hex}: {}",
+            "strfry import failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
 
-    tracing::warn!(pubkey = %pubkey_hex, "deleted all events for pubkey");
     Ok(())
 }
 
@@ -451,52 +554,11 @@ fn next_arg(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<Strin
         .ok_or_else(|| anyhow!("missing value for {flag}"))
 }
 
-fn load_failure_state(path: &PathBuf) -> Result<BTreeMap<String, u32>> {
-    if !path.exists() {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create state directory {}", parent.display()))?;
-        }
-        fs::write(path, b"{}")
-            .with_context(|| format!("failed to initialize state file {}", path.display()))?;
-        return Ok(BTreeMap::new());
-    }
-
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("failed to read state file {}", path.display()))?;
-
-    if raw.trim().is_empty() {
-        return Ok(BTreeMap::new());
-    }
-
-    let entries: BTreeMap<String, u32> = serde_json::from_str(&raw)
-        .with_context(|| format!("failed to parse state file {}", path.display()))?;
-
-    Ok(entries)
-}
-
-fn save_failure_state(path: &PathBuf, failures: &BTreeMap<String, u32>) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create state directory {}", parent.display()))?;
-    }
-
-    let json = serde_json::to_vec_pretty(failures)
-        .with_context(|| format!("failed to serialize state file {}", path.display()))?;
-    let tmp_path = path.with_extension("tmp");
-    fs::write(&tmp_path, json)
-        .with_context(|| format!("failed to write temporary state file {}", tmp_path.display()))?;
-    fs::rename(&tmp_path, path)
-        .with_context(|| format!("failed to replace state file {}", path.display()))?;
-
-    Ok(())
-}
-
 fn init_tracing() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("cvm_announcement_cleaner=info".parse().unwrap())
+                .add_directive("cvm_announcement_crawler=info".parse().unwrap())
                 .add_directive("contextvm_sdk=warn".parse().unwrap()),
         )
         .try_init();
@@ -504,18 +566,16 @@ fn init_tracing() {
 
 fn print_help() {
     println!(
-        "cvm-announcement-cleaner\n\n\
+        "cvm-announcement-crawler\n\n\
 Usage:\n\
-  cargo run --manifest-path tools/cvm-announcement-cleaner/Cargo.toml -- [options]\n\n\
+  cargo run --manifest-path tools/cvm-announcement-crawler/Cargo.toml -- [options]\n\n\
 Options:\n\
   --strfry-bin <path>          Path to the strfry binary [default: ./strfry]\n\
-  --state-file <path>          Path to the persisted failure state JSON [default: /var/lib/strfry/cvm-announcement-cleaner-state.json]\n\
-  --local-relay <url>          Local relay URL used for fallback probing [default: ws://127.0.0.1:7777]\n\
+  --local-relay <url>          Local relay URL [default: ws://127.0.0.1:7777]\n\
   --timeout-seconds <n>        Network timeout in seconds [default: 10]\n\
-  --failure-threshold <n>      Consecutive failed rounds required before deletion [default: 3]\n\
-  --rounds <n>                 Number of rounds to execute in this process [default: 3]\n\
+  --rounds <n>                 Number of rounds to execute in this process [default: 1]\n\
   --interval-seconds <n>       Delay between rounds [default: 3600]\n\
-  --dry-run                    Log deletion decisions without deleting\n\
+  --dry-run                    Log import decisions without importing\n\
   --help                       Show this message\n"
     );
 }

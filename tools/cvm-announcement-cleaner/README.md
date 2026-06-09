@@ -5,12 +5,7 @@ Rust sidecar for cleaning dead ContextVM server announcements from a local `strf
 ## Current behavior
 
 - scans local server announcements from `kind 11316`
-- fetches `kind 10002` relay lists from:
-  - local relay
-  - `wss://relay.damus.io`
-  - `wss://relay.primal.net`
-  - `wss://relay.nostr.net`
-  - `wss://nos.lol`
+- fetches `kind 10002` relay lists from the local relay and a set of external fallback relays (see source for current list)
 - probes candidate relays by sending a minimal ContextVM request
 - falls back to probing through the local relay when no usable `10002` relay list is found
 - persists consecutive failure counts in a small JSON file keyed by pubkey
